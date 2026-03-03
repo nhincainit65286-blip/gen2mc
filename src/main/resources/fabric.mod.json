@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "id": "google-chat",
+  "name": "GoogleChat",
+  "version": "${version}",
+  "description": "Automatic, multi-service, client- or serverside message translations",
+  "authors": ["JFronny"],
+  "contact": {
+    "email": "projects.contact@frohnmeyer-wds.de",
+    "homepage": "https://jfronny.gitlab.io",
+    "issues": "https://git.jfronny.dev/JfMods/GoogleChat/issues",
+    "sources": "https://git.jfronny.dev/JfMods/GoogleChat"
+  },
+  "license": "MIT",
+  "icon": "assets/google-chat/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "libjf:config": ["io.gitlab.jfronny.googlechat.JFC_GoogleChatConfig"],
+    "server": ["io.gitlab.jfronny.googlechat.server.GoogleChatServer"],
+    "main": ["io.gitlab.jfronny.googlechat.GoogleChat"],
+    "client": ["io.gitlab.jfronny.googlechat.client.GoogleChatClient"]
+  },
+  "mixins": [
+    "google-chat.mixins.json",
+    {
+      "config": "google-chat.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "accessWidener": "google-chat.accesswidener",
+  "depends": {
+    "fabricloader": ">=0.12.12",
+    "minecraft": "*",
+    "libjf-config-core-v2": "*",
+    "libjf-translate-v1": "*",
+    "fabric-message-api-v1": "*"
+  }
+}

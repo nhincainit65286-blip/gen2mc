@@ -1,0 +1,6 @@
+accessWidener	v2	named
+
+accessible class net/minecraft/client/multiplayer/chat/ChatListener$Message
+accessible method net/minecraft/client/multiplayer/chat/ChatListener$Message <init> (Lnet/minecraft/network/chat/MessageSignature;Ljava/util/function/BooleanSupplier;)V
+
+accessible method net/minecraft/client/multiplayer/chat/ChatListener <init> (Lnet/minecraft/client/Minecraft;)V
