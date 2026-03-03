@@ -21,10 +21,17 @@ jobs:
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
 
+      - name: Setup Swap
+        run: |
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
       - name: Build
         run: ./gradlew build
         env:
-          GRADLE_OPTS: -Xmx6G -XX:+UseG1GC
+          GRADLE_OPTS: -Xmx12G -XX:+UseG1GC
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
