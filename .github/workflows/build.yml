@@ -1,0 +1,31 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Build
+        run: ./gradlew build
+        env:
+          GRADLE_OPTS: -Xmx4G -XX:+UseG1GC
+
+      - name: Upload JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-chat
+          path: build/libs/*.jar
