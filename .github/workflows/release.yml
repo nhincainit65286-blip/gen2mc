@@ -24,7 +24,7 @@ jobs:
       - name: Build
         run: ./gradlew build
         env:
-          GRADLE_OPTS: -Xmx4G -XX:+UseG1GC
+          GRADLE_OPTS: -Xmx6G -XX:+UseG1GC
 
       - name: Create Release
         uses: softprops/action-gh-release@v2

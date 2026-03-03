@@ -25,7 +25,7 @@ jobs:
       - name: Build
         run: ./gradlew build
         env:
-          GRADLE_OPTS: -Xmx4G -XX:+UseG1GC
+          GRADLE_OPTS: -Xmx6G -XX:+UseG1GC
 
       - name: Upload JAR
         uses: actions/upload-artifact@v4
