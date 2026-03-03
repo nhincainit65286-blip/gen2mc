@@ -31,9 +31,7 @@ jobs:
           free -h
 
       - name: Build
-        run: ./gradlew build
-        env:
-          GRADLE_OPTS: -Xmx12G -XX:+UseG1GC
+        run: ./gradlew build --no-daemon
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
