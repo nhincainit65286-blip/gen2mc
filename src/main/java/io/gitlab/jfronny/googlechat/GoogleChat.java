@@ -133,21 +133,75 @@ public class GoogleChat implements ModInitializer {
     }
 
     private static final Pattern SURROUNDING_SPACE_PATTERN = Pattern.compile("^(\\s*)(.*\\S+)(\\s*)$", Pattern.MULTILINE);
+    private static final Pattern FORMATTING_CODE_PATTERN = Pattern.compile("(\u00A7[0-9a-fA-Fk-oK-OrR]|§[0-9a-fA-Fk-oK-OrR])");
+    
+    private static String protectFormattingCodes(String text) {
+        StringBuilder protectedText = new StringBuilder();
+        Matcher matcher = FORMATTING_CODE_PATTERN.matcher(text);
+        int lastEnd = 0;
+        int placeholderIndex = 0;
+        StringBuilder placeholders = new StringBuilder();
+        
+        while (matcher.find()) {
+            protectedText.append(text, lastEnd, matcher.start());
+            String placeholder = "§FORMATTING_" + placeholderIndex++ + "§";
+            protectedText.append(placeholder);
+            placeholders.append(matcher.group());
+            lastEnd = matcher.end();
+        }
+        protectedText.append(text.substring(lastEnd));
+        
+        return protectedText.toString() + "\u0000" + placeholders.toString();
+    }
+    
+    private static String restoreFormattingCodes(String text) {
+        String[] parts = text.split("\u0000", 2);
+        if (parts.length < 2) return text;
+        
+        String protectedText = parts[0];
+        String formattingCodes = parts[1];
+        
+        Matcher matcher = Pattern.compile("§FORMATTING_(\\d+)§").matcher(protectedText);
+        StringBuilder result = new StringBuilder();
+        int lastEnd = 0;
+        
+        while (matcher.find()) {
+            result.append(protectedText, lastEnd, matcher.start());
+            int codeIndex = Integer.parseInt(matcher.group(1));
+            result.append(formattingCodes.charAt(codeIndex));
+            lastEnd = matcher.end();
+        }
+        result.append(protectedText.substring(lastEnd));
+        
+        return result.toString();
+    }
+    
     public static String translateIfNeeded(String source, TranslationDirection direction, boolean respectRegex) {
         if (source == null || source.isBlank()) return source;
         if (direction.shouldSkipOutright()) return source;
         if (respectRegex && direction.failsRegex(source)) return source;
+        
+        String protectedSource = protectFormattingCodes(source);
+        String[] parts = protectedSource.split("\u0000", 2);
+        String textToTranslate = parts[0];
+        String originalFormatting = parts.length > 1 ? parts[1] : "";
+        
         return computeIfAbsent2(strings.get(direction), source, t -> {
             try {
-                Matcher m = SURROUNDING_SPACE_PATTERN.matcher(source);
+                Matcher m = SURROUNDING_SPACE_PATTERN.matcher(textToTranslate);
                 if (!m.find()) return source;
-                // Ignore generics since this is apparently not something java supports (even with var)
                 @SuppressWarnings("rawtypes") TranslateService svc = GoogleChat.TRANSLATE_SERVICE;
                 if (svc == null) throw new NullPointerException("Translate service uninitialized");
                 Language sourceLang = svc.parseLang(direction.source());
                 Language targetLang = svc.parseLang(direction.target());
-                //noinspection unchecked
-                return m.group(1) + svc.translate(m.group(2), sourceLang, targetLang) + m.group(3);
+                String translated = m.group(1) + svc.translate(m.group(2), sourceLang, targetLang) + m.group(3);
+                
+                if (originalFormatting.isEmpty()) {
+                    return translated;
+                }
+                
+                String restored = translated + "\u0000" + originalFormatting;
+                return restoreFormattingCodes(restored);
             } catch (Throwable e) {
                 LOGGER.error("Could not translate text: {0}", e, source);
                 return source;
