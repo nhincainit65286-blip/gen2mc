@@ -28,6 +28,8 @@
     "google-chat.jfconfig.advanced.cacheSize.tooltips": "The size of each message cache. Since there are six caches, the actual size will be six times this.",
     "google-chat.jfconfig.advanced.async": "Async",
     "google-chat.jfconfig.advanced.async.tooltips": "Whether to asynchronously process messages. Should prevent some stutters, but might cause other issues. Disable if you no longer receive messages",
+    "google-chat.jfconfig.advanced.maxParallelRequests": "Max Parallel Requests",
+    "google-chat.jfconfig.advanced.maxParallelRequests.tooltips": "Maximum number of translation API requests that may run at once when async mode is enabled",
     "google-chat.jfconfig.advanced.translateMessageArguments": "Translate MessageArguments",
     "google-chat.jfconfig.advanced.translateMessageArguments.tooltips": "Whether to translate arguments of commands designated as being messages",
     "google-chat.jfconfig.advanced.debugLogs": "Debug Logs",

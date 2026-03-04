@@ -15,7 +15,7 @@ import net.minecraft.network.chat.contents.PlainTextContents;
 import net.minecraft.network.chat.contents.TranslatableContents;
 
 import java.util.*;
-import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.*;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -30,6 +30,9 @@ public class GoogleChat implements ModInitializer {
     private static final TranslationDirection.Split<Map<Component, Component>> finalTexts = TranslationDirection.Split.of(() -> new FixedSizeMap<>(GoogleChatConfig.Advanced.cacheSize));
     private static final TranslationDirection.Split<Map<ComponentContents, ComponentContents>> textContents = TranslationDirection.Split.of(() -> new FixedSizeMap<>(GoogleChatConfig.Advanced.cacheSize));
     private static final TranslationDirection.Split<Map<String, String>> strings = TranslationDirection.Split.of(() -> new FixedSizeMap<>(GoogleChatConfig.Advanced.cacheSize));
+    private static volatile int maxParallelRequests = Math.max(1, GoogleChatConfig.Advanced.maxParallelRequests);
+    private static volatile Semaphore requestLimiter = new Semaphore(maxParallelRequests);
+    private static final ExecutorService translationExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     @Override
     public void onInitialize() {
@@ -42,6 +45,7 @@ public class GoogleChat implements ModInitializer {
                 map.clear();
             }
         });
+        updateRequestLimiter();
     }
 
     public static Component translateIfNeeded(Component source, TranslationDirection direction, boolean respectRegex) {
@@ -75,9 +79,8 @@ public class GoogleChat implements ModInitializer {
     private static MutableComponent doTranslateIfNeeded(Component source, TranslationDirection direction) {
         MutableComponent translated = MutableComponent.create(translateIfNeeded(source.getContents(), direction, false))
                 .setStyle(source.getStyle());
-        for (Component sibling : source.getSiblings()) {
-            translated.append(doTranslateIfNeeded(sibling, direction));
-        }
+        List<Component> translatedSiblings = mapPossiblyAsync(source.getSiblings(), sibling -> doTranslateIfNeeded(sibling, direction));
+        translatedSiblings.forEach(translated::append);
         return translated;
     }
 
@@ -98,7 +101,7 @@ public class GoogleChat implements ModInitializer {
         return computeIfAbsent2(textContents.get(direction), source, t -> switch (t) {
             case TranslatableContents tx -> {
                 // TranslatableText is not translated, but its fallback and arguments are
-                Object[] args = Arrays.stream(tx.getArgs()).map(arg -> switch (arg) {
+                Object[] args = mapPossiblyAsync(Arrays.asList(tx.getArgs()), arg -> switch (arg) {
                     case Component tx1 -> doTranslateIfNeeded(tx1, direction);
                     case ComponentContents tx1 -> translateIfNeeded(tx1, direction, false);
                     case String tx1 -> translateIfNeeded(tx1, direction, false);
@@ -130,6 +133,16 @@ public class GoogleChat implements ModInitializer {
 
     private static Style addHover(Style style, Component hoverText) {
         return style.withHoverEvent(new HoverEvent.ShowText(hoverText));
+    }
+
+    private static <T, R> List<R> mapPossiblyAsync(Collection<T> source, Function<T, R> mapper) {
+        if (!GoogleChatConfig.Advanced.async || source.size() <= 1) {
+            return source.stream().map(mapper).toList();
+        }
+        List<CompletableFuture<R>> futures = source.stream()
+                .map(value -> CompletableFuture.supplyAsync(() -> mapper.apply(value), translationExecutor))
+                .toList();
+        return futures.stream().map(CompletableFuture::join).toList();
     }
 
     private static final Pattern SURROUNDING_SPACE_PATTERN = Pattern.compile("^(\\s*)(.*\\S+)(\\s*)$", Pattern.MULTILINE);
@@ -194,7 +207,7 @@ public class GoogleChat implements ModInitializer {
                 if (svc == null) throw new NullPointerException("Translate service uninitialized");
                 Language sourceLang = svc.parseLang(direction.source());
                 Language targetLang = svc.parseLang(direction.target());
-                String translated = m.group(1) + svc.translate(m.group(2), sourceLang, targetLang) + m.group(3);
+                String translated = m.group(1) + withRequestPermit(() -> svc.translate(m.group(2), sourceLang, targetLang)) + m.group(3);
                 
                 if (originalFormatting.isEmpty()) {
                     return translated;
@@ -209,13 +222,54 @@ public class GoogleChat implements ModInitializer {
         });
     }
 
+    @FunctionalInterface
+    private interface ThrowingSupplier<T> {
+        T get() throws Throwable;
+    }
+
+    private static <T> T withRequestPermit(ThrowingSupplier<T> supplier) throws Throwable {
+        updateRequestLimiter();
+        if (!GoogleChatConfig.Advanced.async || maxParallelRequests <= 1) {
+            return supplier.get();
+        }
+        Semaphore limiter = requestLimiter;
+        boolean interrupted = false;
+        while (true) {
+            try {
+                limiter.acquire();
+                break;
+            } catch (InterruptedException ignored) {
+                interrupted = true;
+            }
+        }
+        try {
+            return supplier.get();
+        } finally {
+            limiter.release();
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+    }
+
+    private static void updateRequestLimiter() {
+        int configuredMax = Math.max(1, GoogleChatConfig.Advanced.maxParallelRequests);
+        if (configuredMax == maxParallelRequests) return;
+        synchronized (GoogleChat.class) {
+            if (configuredMax == maxParallelRequests) return;
+            maxParallelRequests = configuredMax;
+            requestLimiter = new Semaphore(configuredMax);
+        }
+    }
+
     private static <K, V> V computeIfAbsent2(Map<K, V> map, K key, Function<K, V> compute) {
         if (!GoogleChatConfig.Advanced.async && !IS_SERVER) return map.computeIfAbsent(key, compute);
         synchronized (map) {
             if (map.containsKey(key)) return map.get(key);
-            V value = compute.apply(key);
-            map.put(key, value);
-            return value;
+        }
+        V computed = compute.apply(key);
+        synchronized (map) {
+            if (map.containsKey(key)) return map.get(key);
+            map.put(key, computed);
+            return computed;
         }
     }
 }

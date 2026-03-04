@@ -4,9 +4,13 @@ import io.gitlab.jfronny.googlechat.*;
 import net.minecraft.network.chat.Component;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public sealed interface TranslatableContainer<T, S extends TranslatableContainer<T, S>> {
     S translate(TranslationDirection direction);
+
+    ExecutorService EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
 
     record Sync(Component text) implements TranslatableContainer<Component, Sync> {
         @Override
@@ -18,7 +22,7 @@ public sealed interface TranslatableContainer<T, S extends TranslatableContainer
     record Async(CompletableFuture<Component> text) implements TranslatableContainer<CompletableFuture<Component>, Async> {
         @Override
         public Async translate(TranslationDirection direction) {
-            return new Async(text.thenApplyAsync(msg -> translateAndLog(msg, direction)));
+            return new Async(text.thenApplyAsync(msg -> translateAndLog(msg, direction), EXECUTOR));
         }
     }
 

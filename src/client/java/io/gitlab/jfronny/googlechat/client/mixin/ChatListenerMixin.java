@@ -20,6 +20,7 @@ import java.time.Instant;
 import java.util.Deque;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
@@ -36,6 +37,7 @@ public abstract class ChatListenerMixin {
     }
 
     @Mutable @Shadow @Final private Deque<ChatListener.Message> delayedMessageQueue;
+    @Unique private static final ExecutorService googlechat$executor = Executors.newVirtualThreadPerTaskExecutor();
     @Unique CompletableFuture<Void> googlechat$currentFuture = CompletableFuture.completedFuture(null);
     @Unique ThreadLocal<GameProfile> sender = new ThreadLocal<>();
 
@@ -101,16 +103,27 @@ public abstract class ChatListenerMixin {
     @Unique
     private void googlechat$scheduleS2C(Component message, Consumer<Component> runnable) {
         if (!GoogleChatConfig.Advanced.async) runnable.accept(googlechat$s2c(message));
-        else googlechat$currentFuture = googlechat$currentFuture
-                .handleAsync((_1, _2) -> googlechat$s2c(message), Executors.newVirtualThreadPerTaskExecutor())
-                .whenCompleteAsync((msg, _2) -> delayedMessageQueue.add(new ChatListener.Message(null, () -> {
+        else {
+            CompletableFuture<Component> translated = CompletableFuture.supplyAsync(() -> googlechat$s2c(message), googlechat$executor);
+            googlechat$currentFuture = googlechat$currentFuture
+                .handle((_1, _2) -> (Void) null)
+                .thenCompose(_1 -> translated)
+                .handle((msg, throwable) -> {
+                    if (throwable != null) {
+                        GoogleChat.LOGGER.error("Something went wrong while processing a message", throwable);
+                        return message;
+                    }
+                    return msg;
+                })
+                .thenAccept(msg -> delayedMessageQueue.add(new ChatListener.Message(null, () -> {
                     runnable.accept(msg);
                     return false;
-                })), Executors.newVirtualThreadPerTaskExecutor())
+                })))
                 .exceptionally(throwable -> {
-                    GoogleChat.LOGGER.error("Something went wrong while processing a message", throwable);
+                    GoogleChat.LOGGER.error("Something went wrong while queuing a translated message", throwable);
                     return null;
-                }).handle((_1, _2) -> (Void) null);
+                });
+        }
     }
 
     @Unique
