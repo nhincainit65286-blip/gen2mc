@@ -1,0 +1,16 @@
+[
+  {
+    "modid": "googlechatforge",
+    "name": "GoogleChat Forge",
+    "description": "Client chat translation for Forge 1.8.9.",
+    "version": "${version}",
+    "mcversion": "${mcversion}",
+    "url": "",
+    "updateUrl": "",
+    "authorList": ["JFronny", "nhincainit65286-blip"],
+    "credits": "Ported for legacy Forge",
+    "logoFile": "",
+    "screenshots": [],
+    "dependencies": []
+  }
+]
