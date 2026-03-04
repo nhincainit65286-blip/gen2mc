@@ -8,6 +8,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -19,11 +20,22 @@ public class ChatScreenMixin {
         "tellraw", "title", "data", "scoreboard", "team", "trigger", "execute", "recipe", "function"
     );
     
-    private static final Map<String, String> COMMAND_ALIASES = Map.of(
-        "w", "tell", "msg", "tell", "whisper", "tell", "reply", "tell",
-        "t", "tell", "r", "msg", "me", "cemetery", "bc", "broadcast",
-        "say", "broadcast", "g", "global", "l", "local", "loc", "locate"
-    );
+    private static final Map<String, String> COMMAND_ALIASES;
+    static {
+        COMMAND_ALIASES = new HashMap<>();
+        COMMAND_ALIASES.put("w", "tell");
+        COMMAND_ALIASES.put("msg", "tell");
+        COMMAND_ALIASES.put("whisper", "tell");
+        COMMAND_ALIASES.put("reply", "tell");
+        COMMAND_ALIASES.put("t", "tell");
+        COMMAND_ALIASES.put("r", "msg");
+        COMMAND_ALIASES.put("me", "cemetery");
+        COMMAND_ALIASES.put("bc", "broadcast");
+        COMMAND_ALIASES.put("say", "broadcast");
+        COMMAND_ALIASES.put("g", "global");
+        COMMAND_ALIASES.put("l", "local");
+        COMMAND_ALIASES.put("loc", "locate");
+    }
     
     private static final Pattern SELECTOR_PATTERN = Pattern.compile("@[a-zA-Z][a-zA-Z0-9]*(\\[.*?])?");
     private static final Pattern QUOTED_ARG_PATTERN = Pattern.compile("(\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*')");
