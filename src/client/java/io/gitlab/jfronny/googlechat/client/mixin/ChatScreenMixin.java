@@ -8,6 +8,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
 
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -15,27 +16,41 @@ import java.util.regex.Pattern;
 @Mixin(ChatScreen.class)
 public class ChatScreenMixin {
     private static final Set<String> NO_TRANSLATE_COMMANDS = Set.of(
-        "tellraw", "title", "data", "scoreboard", "team", "trigger"
+        "tellraw", "title", "data", "scoreboard", "team", "trigger", "execute", "recipe", "function"
     );
+    
+    private static final Map<String, String> COMMAND_ALIASES = Map.of(
+        "w", "tell", "msg", "tell", "whisper", "tell", "reply", "tell",
+        "t", "tell", "r", "msg", "me", "cemetery", "bc", "broadcast",
+        "say", "broadcast", "g", "global", "l", "local", "loc", "locate"
+    );
+    
     private static final Pattern SELECTOR_PATTERN = Pattern.compile("@[a-zA-Z][a-zA-Z0-9]*(\\[.*?])?");
-    private static final Pattern QUOTED_ARG_PATTERN = Pattern.compile("(\"[^\"]*\"|'[^']*')");
+    private static final Pattern QUOTED_ARG_PATTERN = Pattern.compile("(\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*')");
+    private static final Pattern JSON_START_PATTERN = Pattern.compile("^\\s*\\{");
+    private static final Pattern MULTIPLE_SPACES_PATTERN = Pattern.compile(" {2,}");
 
     @ModifyVariable(method = "handleChatInput(Ljava/lang/String;Z)V", at = @At(value = "HEAD"), argsOnly = true, ordinal = 0)
     String googlechat$translateChatText(String chatText) {
         if (!GoogleChatConfig.General.enabled) return chatText;
+        if (chatText == null || chatText.isEmpty()) return chatText;
         
         if (chatText.startsWith("/")) {
-            int spaceIndex = chatText.indexOf(' ');
-            if (spaceIndex > 0) {
-                String command = chatText.substring(1, spaceIndex).toLowerCase();
+            int firstSpace = chatText.indexOf(' ');
+            int commandEnd = firstSpace > 0 ? firstSpace : chatText.length();
+            
+            String commandName = chatText.substring(1, commandEnd).toLowerCase();
+            String baseCommand = COMMAND_ALIASES.getOrDefault(commandName, commandName);
+            
+            if (NO_TRANSLATE_COMMANDS.contains(baseCommand)) {
+                return chatText;
+            }
+            
+            if (firstSpace > 0) {
+                String rawArgs = chatText.substring(firstSpace + 1);
+                String translatedArgs = translateArgsWithProtection(rawArgs);
                 
-                if (NO_TRANSLATE_COMMANDS.contains(command)) {
-                    return chatText;
-                }
-                
-                String rawArgs = chatText.substring(spaceIndex + 1);
-                String translatedArgs = translateArgsWithSelectors(rawArgs);
-                return command + " " + translatedArgs;
+                return chatText.substring(0, 1) + commandName + " " + translatedArgs;
             }
             return chatText;
         }
@@ -43,7 +58,28 @@ public class ChatScreenMixin {
         return GoogleChat.translateIfNeeded(chatText, TranslationDirection.C2S, true);
     }
 
-    private String translateArgsWithSelectors(String args) {
+    private String translateArgsWithProtection(String args) {
+        if (args == null || args.isEmpty()) return args;
+        
+        if (JSON_START_PATTERN.matcher(args).find()) {
+            return args;
+        }
+        
+        if (args.contains("#")) {
+            StringBuilder result = new StringBuilder();
+            int lastEnd = 0;
+            Pattern hashtagPattern = Pattern.compile("#\\S+");
+            Matcher hashtagMatcher = hashtagPattern.matcher(args);
+            
+            while (hashtagMatcher.find()) {
+                result.append(args, lastEnd, hashtagMatcher.start());
+                result.append(hashtagMatcher.group());
+                lastEnd = hashtagMatcher.end();
+            }
+            result.append(args.substring(lastEnd));
+            args = result.toString();
+        }
+        
         StringBuilder result = new StringBuilder();
         int lastEnd = 0;
 
@@ -56,7 +92,8 @@ public class ChatScreenMixin {
         }
         
         if (lastEnd == 0) {
-            return GoogleChat.translateIfNeeded(args, TranslationDirection.C2S, true);
+            String translated = GoogleChat.translateIfNeeded(args, TranslationDirection.C2S, true);
+            return preserveMultipleSpaces(args, translated);
         }
         
         result.append(args.substring(lastEnd));
@@ -71,22 +108,47 @@ public class ChatScreenMixin {
             finalResult.append(remaining, lastEnd, quotedMatcher.start());
             
             String quoted = quotedMatcher.group();
-            if (quoted.startsWith("\"") || quoted.startsWith("'")) {
-                String inner = quoted.substring(1, quoted.length() - 1);
-                String translated = GoogleChat.translateIfNeeded(inner, TranslationDirection.C2S, true);
-                finalResult.append(quoted.charAt(0)).append(translated).append(quoted.charAt(0));
-            } else {
-                finalResult.append(quoted);
-            }
+            char quoteChar = quoted.charAt(0);
+            String inner = quoted.substring(1, quoted.length() - 1);
+            String translated = GoogleChat.translateIfNeeded(inner, TranslationDirection.C2S, true);
+            finalResult.append(quoteChar).append(translated).append(quoteChar);
             lastEnd = quotedMatcher.end();
         }
         
         if (lastEnd == 0) {
-            return GoogleChat.translateIfNeeded(remaining, TranslationDirection.C2S, true);
+            String translated = GoogleChat.translateIfNeeded(remaining, TranslationDirection.C2S, true);
+            return preserveMultipleSpaces(args, translated);
         }
         
         finalResult.append(remaining.substring(lastEnd));
         
-        return finalResult.toString();
+        return preserveMultipleSpaces(args, finalResult.toString());
+    }
+
+    private String preserveMultipleSpaces(String original, String translated) {
+        if (original == null || translated == null) return translated;
+        
+        Matcher spacesMatcher = MULTIPLE_SPACES_PATTERN.matcher(original);
+        if (!spacesMatcher.find()) return translated;
+        
+        spacesMatcher.reset();
+        StringBuilder result = new StringBuilder(translated);
+        int offset = 0;
+        
+        while (spacesMatcher.find()) {
+            int pos = spacesMatcher.start() + offset;
+            String spaces = spacesMatcher.group();
+            int endPos = spacesMatcher.end() + offset;
+            
+            if (pos < result.length() && endPos <= result.length()) {
+                String existing = result.substring(pos, endPos);
+                if (!existing.equals(spaces)) {
+                    result.replace(pos, endPos, spaces);
+                }
+            }
+            offset += spaces.length() - (endPos - pos);
+        }
+        
+        return result.toString();
     }
 }
