@@ -12,6 +12,6 @@ import org.spongepowered.asm.mixin.injection.ModifyVariable;
 public class LocalPlayerMixin {
     @ModifyVariable(method = "displayClientMessage(Lnet/minecraft/network/chat/Component;Z)V", at = @At("HEAD"), argsOnly = true, ordinal = 0)
     Component googlechat$translateMessage(Component source) {
-        return GoogleChat.translateIfNeeded(source, TranslationDirection.C2S, true);
+        return GoogleChat.translateIfNeeded(source, TranslationDirection.S2C, true);
     }
 }

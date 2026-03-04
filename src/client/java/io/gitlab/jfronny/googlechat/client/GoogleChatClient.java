@@ -71,8 +71,8 @@ public class GoogleChatClient implements ClientModInitializer {
             }
         }
         if (GoogleChatConfig.Advanced.debugLogs) {
-            GoogleChat.LOGGER.info("Reconstituted command: {0} from {1}", builder.substring(0, builder.length() - 1), source);
+            GoogleChat.LOGGER.info("Reconstituted command: {0} from {1}", builder.isEmpty() ? "" : builder.substring(0, builder.length() - 1), source);
         }
-        return Optional.of(builder.substring(0, builder.length() - 1));
+        return Optional.of(builder.isEmpty() ? "" : builder.substring(0, builder.length() - 1));
     }
 }

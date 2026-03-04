@@ -28,7 +28,7 @@ public sealed interface TranslatableContainer<T, S extends TranslatableContainer
 
     static Component translateAndLog(final Component source, final TranslationDirection direction) {
         var translated = GoogleChat.translateIfNeeded(source, direction, true);
-        if (GoogleChatConfig.Advanced.debugLogs) GoogleChat.LOGGER.info("Applied C2S translation from {0} to {1}", source, translated);
+        if (GoogleChatConfig.Advanced.debugLogs) GoogleChat.LOGGER.info("Applied {0} translation from {1} to {2}", direction, source, translated);
         return translated;
     }
 }

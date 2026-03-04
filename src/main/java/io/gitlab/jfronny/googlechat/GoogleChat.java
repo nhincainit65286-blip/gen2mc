@@ -117,7 +117,7 @@ public class GoogleChat implements ModInitializer {
                     case String tx1 -> translateIfNeeded(tx1, direction, false);
                     case null -> null;
                     default -> {
-                        if (GoogleChatConfig.Advanced.debugLogs) LOGGER.warn("Unhandled argument type: {0} ({1}})", arg.getClass().toString(), arg.toString());
+                        if (GoogleChatConfig.Advanced.debugLogs) LOGGER.warn("Unhandled argument type: {0} ({1})", arg.getClass().toString(), arg.toString());
                         yield arg;
                     }
                 }).toArray();
@@ -126,7 +126,7 @@ public class GoogleChat implements ModInitializer {
             case PlainTextContents.LiteralContents(var string) ->
                     new PlainTextContents.LiteralContents(translateIfNeeded(string, direction, false));
             case null, default -> {
-                if (GoogleChatConfig.Advanced.debugLogs) LOGGER.warn("Unhandled text type: {0} ({1}})", source.getClass().toString(), source.toString());
+                if (GoogleChatConfig.Advanced.debugLogs) LOGGER.warn("Unhandled text type: {0} ({1})", source.getClass().toString(), source.toString());
                 yield t;
             }
         });
@@ -157,24 +157,26 @@ public class GoogleChat implements ModInitializer {
 
     private static final Pattern SURROUNDING_SPACE_PATTERN = Pattern.compile("^(\\s*)(.*\\S+)(\\s*)$", Pattern.MULTILINE);
     private static final Pattern FORMATTING_CODE_PATTERN = Pattern.compile("(\u00A7[0-9a-fA-Fk-oK-OrR]|§[0-9a-fA-Fk-oK-OrR])");
+    private static final Pattern FORMATTING_PLACEHOLDER_PATTERN = Pattern.compile("§FORMATTING_(\\d+)§");
+    private static final String FORMATTING_DELIMITER = "\u0001";
     
     private static String protectFormattingCodes(String text) {
         StringBuilder protectedText = new StringBuilder();
         Matcher matcher = FORMATTING_CODE_PATTERN.matcher(text);
         int lastEnd = 0;
         int placeholderIndex = 0;
-        StringBuilder placeholders = new StringBuilder();
+        List<String> placeholders = new ArrayList<>();
         
         while (matcher.find()) {
             protectedText.append(text, lastEnd, matcher.start());
             String placeholder = "§FORMATTING_" + placeholderIndex++ + "§";
             protectedText.append(placeholder);
-            placeholders.append(matcher.group());
+            placeholders.add(matcher.group());
             lastEnd = matcher.end();
         }
         protectedText.append(text.substring(lastEnd));
         
-        return protectedText.toString() + "\u0000" + placeholders.toString();
+        return protectedText.toString() + "\u0000" + String.join(FORMATTING_DELIMITER, placeholders);
     }
     
     private static String restoreFormattingCodes(String text) {
@@ -182,16 +184,18 @@ public class GoogleChat implements ModInitializer {
         if (parts.length < 2) return text;
         
         String protectedText = parts[0];
-        String formattingCodes = parts[1];
+        String[] formattingCodes = parts[1].isEmpty() ? new String[0] : parts[1].split(FORMATTING_DELIMITER, -1);
         
-        Matcher matcher = Pattern.compile("§FORMATTING_(\\d+)§").matcher(protectedText);
+        Matcher matcher = FORMATTING_PLACEHOLDER_PATTERN.matcher(protectedText);
         StringBuilder result = new StringBuilder();
         int lastEnd = 0;
         
         while (matcher.find()) {
             result.append(protectedText, lastEnd, matcher.start());
             int codeIndex = Integer.parseInt(matcher.group(1));
-            result.append(formattingCodes.charAt(codeIndex));
+            if (codeIndex >= 0 && codeIndex < formattingCodes.length) {
+                result.append(formattingCodes[codeIndex]);
+            }
             lastEnd = matcher.end();
         }
         result.append(protectedText.substring(lastEnd));
@@ -203,33 +207,41 @@ public class GoogleChat implements ModInitializer {
         if (source == null || source.isBlank()) return source;
         if (direction.shouldSkipOutright()) return source;
         if (respectRegex && direction.regexCanFilterNonBlankText() && direction.failsRegex(source)) return source;
+        if (TRANSLATE_SERVICE == null) return source;
+
+        ParsedLanguages parsed = parsedLanguages(direction);
+        if (!parsed.ready()) return source;
         
         String protectedSource = protectFormattingCodes(source);
         String[] parts = protectedSource.split("\u0000", 2);
         String textToTranslate = parts[0];
         String originalFormatting = parts.length > 1 ? parts[1] : "";
         
-        return computeIfAbsent2(strings.get(direction), stringsPending.get(direction), source, t -> {
-            try {
+        try {
+            return computeIfAbsent2(strings.get(direction), stringsPending.get(direction), source, t -> {
                 Matcher m = SURROUNDING_SPACE_PATTERN.matcher(textToTranslate);
                 if (!m.find()) return source;
-                ParsedLanguages parsed = parsedLanguages(direction);
-                if (!parsed.ready()) throw new NullPointerException("Translate service uninitialized");
                 @SuppressWarnings("rawtypes") TranslateService svc = GoogleChat.TRANSLATE_SERVICE;
-                if (svc == null) throw new NullPointerException("Translate service uninitialized");
-                String translated = m.group(1) + withRequestPermit(() -> svc.translate(m.group(2), parsed.sourceLang(), parsed.targetLang())) + m.group(3);
-                
-                if (originalFormatting.isEmpty()) {
-                    return translated;
+                if (svc == null) throw new IllegalStateException("Translate service uninitialized");
+                try {
+                    String translated = m.group(1) + withRequestPermit(() -> svc.translate(m.group(2), parsed.sourceLang(), parsed.targetLang())) + m.group(3);
+
+                    if (originalFormatting.isEmpty()) {
+                        return translated;
+                    }
+
+                    String restored = translated + "\u0000" + originalFormatting;
+                    return restoreFormattingCodes(restored);
+                } catch (Throwable throwable) {
+                    throw new RuntimeException(throwable);
                 }
-                
-                String restored = translated + "\u0000" + originalFormatting;
-                return restoreFormattingCodes(restored);
-            } catch (Throwable e) {
-                LOGGER.error("Could not translate text: {0}", e, source);
-                return source;
+            });
+        } catch (RuntimeException | Error throwable) {
+            if (GoogleChatConfig.Advanced.debugLogs) {
+                LOGGER.error("Could not translate text: {0}", throwable, source);
             }
-        });
+            return source;
+        }
     }
 
     @FunctionalInterface

@@ -5,6 +5,7 @@ import net.fabricmc.loader.api.FabricLoader;
 
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 import java.util.stream.Stream;
 
 public enum TranslationDirection {
@@ -49,7 +50,12 @@ public enum TranslationDirection {
     public boolean failsRegex(String text) {
         boolean isSender = (FabricLoader.getInstance().getEnvironmentType() == EnvType.CLIENT) == (this == TranslationDirection.C2S);
         boolean isBlacklist = isSender ? GoogleChatConfig.Processing.sendingRegexIsBlacklist : GoogleChatConfig.Processing.receivingRegexIsBlacklist;
-        Pattern pattern = regexPattern(isSender);
+        Pattern pattern;
+        try {
+            pattern = regexPattern(isSender);
+        } catch (PatternSyntaxException ignored) {
+            return false;
+        }
         return pattern.matcher(text).matches() == isBlacklist;
     }
 
