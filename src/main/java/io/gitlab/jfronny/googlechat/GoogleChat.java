@@ -30,21 +30,31 @@ public class GoogleChat implements ModInitializer {
     private static final TranslationDirection.Split<Map<Component, Component>> finalTexts = TranslationDirection.Split.of(() -> new FixedSizeMap<>(GoogleChatConfig.Advanced.cacheSize));
     private static final TranslationDirection.Split<Map<ComponentContents, ComponentContents>> textContents = TranslationDirection.Split.of(() -> new FixedSizeMap<>(GoogleChatConfig.Advanced.cacheSize));
     private static final TranslationDirection.Split<Map<String, String>> strings = TranslationDirection.Split.of(() -> new FixedSizeMap<>(GoogleChatConfig.Advanced.cacheSize));
+    private static final TranslationDirection.Split<Map<Component, CompletableFuture<Component>>> finalTextsPending = TranslationDirection.Split.of(HashMap::new);
+    private static final TranslationDirection.Split<Map<ComponentContents, CompletableFuture<ComponentContents>>> textContentsPending = TranslationDirection.Split.of(HashMap::new);
+    private static final TranslationDirection.Split<Map<String, CompletableFuture<String>>> stringsPending = TranslationDirection.Split.of(HashMap::new);
+    private static volatile ParsedLanguages c2sLanguages = ParsedLanguages.empty();
+    private static volatile ParsedLanguages s2cLanguages = ParsedLanguages.empty();
     private static volatile int maxParallelRequests = Math.max(1, GoogleChatConfig.Advanced.maxParallelRequests);
     private static volatile Semaphore requestLimiter = new Semaphore(maxParallelRequests);
     private static final ExecutorService translationExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     @Override
     public void onInitialize() {
+        onConfigChange();
         ForkJoinPool.commonPool().execute(Try.handle(Coerce.runnable(() -> TRANSLATE_SERVICE = TranslateService.getConfigured()), e -> LOGGER.error("Could not initialize translation service", e)));
     }
 
     public static void onConfigChange() {
-        Stream.of(finalTexts, textContents, strings).flatMap(TranslationDirection.Split::stream).forEach(map -> {
+        Stream.<TranslationDirection.Split<? extends Map<?, ?>>>of(finalTexts, textContents, strings, finalTextsPending, textContentsPending, stringsPending)
+                .flatMap(TranslationDirection.Split::stream)
+                .forEach(map -> {
             synchronized (map) {
                 map.clear();
             }
         });
+        TranslationDirection.onConfigChange();
+        updateParsedLanguages();
         updateRequestLimiter();
     }
 
@@ -52,8 +62,8 @@ public class GoogleChat implements ModInitializer {
         if (source == null) return null;
         if (direction.shouldSkipOutright()) return source;
         String sourceString = toString(source);
-        if (respectRegex && direction.failsRegex(sourceString)) return source;
-        return computeIfAbsent2(finalTexts.get(direction), source, t -> {
+        if (respectRegex && direction.regexCanFilterNonBlankText() && direction.failsRegex(sourceString)) return source;
+        return computeIfAbsent2(finalTexts.get(direction), finalTextsPending.get(direction), source, t -> {
             MutableComponent translated = GoogleChatConfig.Processing.desugar
                     ? Component.literal(translateIfNeeded(sourceString, direction, true))
                     : doTranslateIfNeeded(t, direction);
@@ -97,8 +107,8 @@ public class GoogleChat implements ModInitializer {
         if (source == null || source == PlainTextContents.EMPTY) return source;
         if (direction.shouldSkipOutright()) return source;
         String sourceString = toString(source);
-        if (respectRegex && direction.failsRegex(sourceString)) return source;
-        return computeIfAbsent2(textContents.get(direction), source, t -> switch (t) {
+        if (respectRegex && direction.regexCanFilterNonBlankText() && direction.failsRegex(sourceString)) return source;
+        return computeIfAbsent2(textContents.get(direction), textContentsPending.get(direction), source, t -> switch (t) {
             case TranslatableContents tx -> {
                 // TranslatableText is not translated, but its fallback and arguments are
                 Object[] args = mapPossiblyAsync(Arrays.asList(tx.getArgs()), arg -> switch (arg) {
@@ -192,22 +202,22 @@ public class GoogleChat implements ModInitializer {
     public static String translateIfNeeded(String source, TranslationDirection direction, boolean respectRegex) {
         if (source == null || source.isBlank()) return source;
         if (direction.shouldSkipOutright()) return source;
-        if (respectRegex && direction.failsRegex(source)) return source;
+        if (respectRegex && direction.regexCanFilterNonBlankText() && direction.failsRegex(source)) return source;
         
         String protectedSource = protectFormattingCodes(source);
         String[] parts = protectedSource.split("\u0000", 2);
         String textToTranslate = parts[0];
         String originalFormatting = parts.length > 1 ? parts[1] : "";
         
-        return computeIfAbsent2(strings.get(direction), source, t -> {
+        return computeIfAbsent2(strings.get(direction), stringsPending.get(direction), source, t -> {
             try {
                 Matcher m = SURROUNDING_SPACE_PATTERN.matcher(textToTranslate);
                 if (!m.find()) return source;
+                ParsedLanguages parsed = parsedLanguages(direction);
+                if (!parsed.ready()) throw new NullPointerException("Translate service uninitialized");
                 @SuppressWarnings("rawtypes") TranslateService svc = GoogleChat.TRANSLATE_SERVICE;
                 if (svc == null) throw new NullPointerException("Translate service uninitialized");
-                Language sourceLang = svc.parseLang(direction.source());
-                Language targetLang = svc.parseLang(direction.target());
-                String translated = m.group(1) + withRequestPermit(() -> svc.translate(m.group(2), sourceLang, targetLang)) + m.group(3);
+                String translated = m.group(1) + withRequestPermit(() -> svc.translate(m.group(2), parsed.sourceLang(), parsed.targetLang())) + m.group(3);
                 
                 if (originalFormatting.isEmpty()) {
                     return translated;
@@ -250,6 +260,44 @@ public class GoogleChat implements ModInitializer {
         }
     }
 
+    private static void updateParsedLanguages() {
+        ParsedLanguages c2s = ParsedLanguages.empty();
+        ParsedLanguages s2c = ParsedLanguages.empty();
+        @SuppressWarnings("rawtypes") TranslateService svc = GoogleChat.TRANSLATE_SERVICE;
+        if (svc != null) {
+            c2s = ParsedLanguages.parse(svc, TranslationDirection.C2S.source(), TranslationDirection.C2S.target());
+            s2c = ParsedLanguages.parse(svc, TranslationDirection.S2C.source(), TranslationDirection.S2C.target());
+        }
+        c2sLanguages = c2s;
+        s2cLanguages = s2c;
+    }
+
+    private static ParsedLanguages parsedLanguages(TranslationDirection direction) {
+        ParsedLanguages cached = direction == TranslationDirection.C2S ? c2sLanguages : s2cLanguages;
+        String source = direction.source();
+        String target = direction.target();
+        if (cached.matches(source, target) && cached.ready()) {
+            return cached;
+        }
+        synchronized (GoogleChat.class) {
+            cached = direction == TranslationDirection.C2S ? c2sLanguages : s2cLanguages;
+            if (cached.matches(source, target) && cached.ready()) {
+                return cached;
+            }
+            @SuppressWarnings("rawtypes") TranslateService svc = GoogleChat.TRANSLATE_SERVICE;
+            if (svc == null) {
+                ParsedLanguages unresolved = new ParsedLanguages(source, target, null, null);
+                if (direction == TranslationDirection.C2S) c2sLanguages = unresolved;
+                else s2cLanguages = unresolved;
+                return unresolved;
+            }
+            ParsedLanguages parsed = ParsedLanguages.parse(svc, source, target);
+            if (direction == TranslationDirection.C2S) c2sLanguages = parsed;
+            else s2cLanguages = parsed;
+            return parsed;
+        }
+    }
+
     private static void updateRequestLimiter() {
         int configuredMax = Math.max(1, GoogleChatConfig.Advanced.maxParallelRequests);
         if (configuredMax == maxParallelRequests) return;
@@ -260,16 +308,72 @@ public class GoogleChat implements ModInitializer {
         }
     }
 
-    private static <K, V> V computeIfAbsent2(Map<K, V> map, K key, Function<K, V> compute) {
+    private static <K, V> V computeIfAbsent2(Map<K, V> map, Map<K, CompletableFuture<V>> pending, K key, Function<K, V> compute) {
         if (!GoogleChatConfig.Advanced.async && !IS_SERVER) return map.computeIfAbsent(key, compute);
         synchronized (map) {
             if (map.containsKey(key)) return map.get(key);
         }
-        V computed = compute.apply(key);
+
+        CompletableFuture<V> ownFuture = new CompletableFuture<>();
+        CompletableFuture<V> existingFuture;
+        synchronized (pending) {
+            existingFuture = pending.get(key);
+            if (existingFuture == null) {
+                pending.put(key, ownFuture);
+            }
+        }
+        if (existingFuture != null) {
+            return existingFuture.join();
+        }
+
         synchronized (map) {
-            if (map.containsKey(key)) return map.get(key);
-            map.put(key, computed);
+            if (map.containsKey(key)) {
+                V value = map.get(key);
+                ownFuture.complete(value);
+                synchronized (pending) {
+                    pending.remove(key, ownFuture);
+                }
+                return value;
+            }
+        }
+
+        try {
+            V computed = compute.apply(key);
+            synchronized (map) {
+                if (map.containsKey(key)) {
+                    computed = map.get(key);
+                } else {
+                    map.put(key, computed);
+                }
+            }
+            ownFuture.complete(computed);
             return computed;
+        } catch (RuntimeException | Error throwable) {
+            ownFuture.completeExceptionally(throwable);
+            throw throwable;
+        } finally {
+            synchronized (pending) {
+                pending.remove(key, ownFuture);
+            }
+        }
+    }
+
+    private record ParsedLanguages(String sourceCode, String targetCode, Language sourceLang, Language targetLang) {
+        static ParsedLanguages empty() {
+            return new ParsedLanguages("", "", null, null);
+        }
+
+        @SuppressWarnings("rawtypes")
+        static ParsedLanguages parse(TranslateService svc, String sourceCode, String targetCode) {
+            return new ParsedLanguages(sourceCode, targetCode, svc.parseLang(sourceCode), svc.parseLang(targetCode));
+        }
+
+        boolean matches(String sourceCode, String targetCode) {
+            return this.sourceCode.equals(sourceCode) && this.targetCode.equals(targetCode);
+        }
+
+        boolean ready() {
+            return sourceLang != null && targetLang != null;
         }
     }
 }

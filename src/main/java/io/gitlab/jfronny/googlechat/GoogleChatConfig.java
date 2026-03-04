@@ -65,7 +65,7 @@ public class GoogleChatConfig {
     public static class Advanced {
         @Entry(min = 1, max = 1024) public static int cacheSize = 256;
         @Entry public static boolean async = true;
-        @Entry(min = 1, max = 64) public static int maxParallelRequests = 8;
+        @Entry(min = 1, max = 64) public static int maxParallelRequests = 16;
         @Entry public static boolean translateMessageArguments = true;
         @Entry public static boolean debugLogs = FabricLoader.getInstance().isDevelopmentEnvironment();
     }
