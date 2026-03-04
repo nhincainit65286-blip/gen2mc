@@ -43,32 +43,37 @@ public abstract class ChatListenerMixin {
 
     @Redirect(method = "handleSystemMessage(Lnet/minecraft/network/chat/Component;Z)V", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/gui/Gui;setOverlayMessage(Lnet/minecraft/network/chat/Component;Z)V"))
     private void googlechat$handleSystemMessage$setOverlayMessage(Gui instance, Component message, boolean tinted) {
-        if (googlechat$shouldTranslate()) googlechat$scheduleS2C(message, msg -> instance.setOverlayMessage(msg, tinted));
+        TranslationDirection direction = googlechat$displayDirection();
+        if (direction != null) googlechat$scheduleTranslation(message, direction, msg -> instance.setOverlayMessage(msg, tinted));
         else instance.setOverlayMessage(message, tinted);
     }
 
     @Redirect(method = "handleSystemMessage(Lnet/minecraft/network/chat/Component;Z)V", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/gui/components/ChatComponent;addMessage(Lnet/minecraft/network/chat/Component;)V"))
     private void googlechat$handleSystemMessage$addMessage(ChatComponent instance, Component text) {
-        if (googlechat$shouldTranslate()) googlechat$scheduleS2C(text, instance::addMessage);
+        TranslationDirection direction = googlechat$displayDirection();
+        if (direction != null) googlechat$scheduleTranslation(text, direction, instance::addMessage);
         else instance.addMessage(text);
     }
 
     @Redirect(method = "handleSystemMessage(Lnet/minecraft/network/chat/Component;Z)V", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/GameNarrator;saySystemQueued(Lnet/minecraft/network/chat/Component;)V"))
     private void googlechat$handleSystemMessage$narrateSystemMessage(GameNarrator instance, Component text) {
-        if (googlechat$shouldTranslate()) googlechat$scheduleS2C(text, instance::saySystemQueued);
+        TranslationDirection direction = googlechat$displayDirection();
+        if (direction != null) googlechat$scheduleTranslation(text, direction, instance::saySystemQueued);
         else instance.saySystemQueued(text);
     }
 
     @Redirect(method = "method_45745", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/gui/components/ChatComponent;addMessage(Lnet/minecraft/network/chat/Component;)V"))
     private void googlechat$handleDisguisedChatMessage$addMessage(ChatComponent instance, Component text) {
-        if (googlechat$shouldTranslate()) googlechat$scheduleS2C(text, instance::addMessage);
+        TranslationDirection direction = googlechat$displayDirection();
+        if (direction != null) googlechat$scheduleTranslation(text, direction, instance::addMessage);
         else instance.addMessage(text);
     }
 
     @Redirect(method = "method_45745", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/multiplayer/chat/ChatListener;narrateChatMessage(Lnet/minecraft/network/chat/ChatType$Bound;Lnet/minecraft/network/chat/Component;)V"))
     private void googlechat$handleDisguisedChatMessage$narrate(ChatListener instance, ChatType.Bound params, Component message) {
         if (instance != (Object) this) GoogleChat.LOGGER.warn("Mismatched message handler in handleSystemMessage");
-        if (googlechat$shouldTranslate()) googlechat$scheduleS2C(message, msg -> narrateChatMessage(params, msg));
+        TranslationDirection direction = googlechat$displayDirection();
+        if (direction != null) googlechat$scheduleTranslation(message, direction, msg -> narrateChatMessage(params, msg));
         else narrateChatMessage(params, message);
     }
 
@@ -79,14 +84,16 @@ public abstract class ChatListenerMixin {
 
     @Redirect(method = "showMessageToPlayer(Lnet/minecraft/network/chat/ChatType$Bound;Lnet/minecraft/network/chat/PlayerChatMessage;Lnet/minecraft/network/chat/Component;Lcom/mojang/authlib/GameProfile;ZLjava/time/Instant;)Z", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/gui/components/ChatComponent;addMessage(Lnet/minecraft/network/chat/Component;Lnet/minecraft/network/chat/MessageSignature;Lnet/minecraft/client/GuiMessageTag;)V"))
     private void googlechat$showMessageToPlayer$addMessage(ChatComponent instance, Component message, MessageSignature signature, GuiMessageTag indicator) {
-        if (googlechat$shouldTranslate()) googlechat$scheduleS2C(message, msg -> instance.addMessage(msg, signature, indicator));
+        TranslationDirection direction = googlechat$displayDirection();
+        if (direction != null) googlechat$scheduleTranslation(message, direction, msg -> instance.addMessage(msg, signature, indicator));
         else instance.addMessage(message, signature, indicator);
     }
 
     @Redirect(method = "showMessageToPlayer(Lnet/minecraft/network/chat/ChatType$Bound;Lnet/minecraft/network/chat/PlayerChatMessage;Lnet/minecraft/network/chat/Component;Lcom/mojang/authlib/GameProfile;ZLjava/time/Instant;)Z", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/multiplayer/chat/ChatListener;narrateChatMessage(Lnet/minecraft/network/chat/ChatType$Bound;Lnet/minecraft/network/chat/Component;)V"))
     private void googlechat$showMessageToPlayer$narrate(ChatListener instance, ChatType.Bound params, Component message) {
         if (instance != (Object) this) GoogleChat.LOGGER.warn("Mismatched message handler in handleSystemMessage");
-        if (googlechat$shouldTranslate()) googlechat$scheduleS2C(message, msg -> narrateChatMessage(params, msg));
+        TranslationDirection direction = googlechat$displayDirection();
+        if (direction != null) googlechat$scheduleTranslation(message, direction, msg -> narrateChatMessage(params, msg));
         else narrateChatMessage(params, message);
     }
 
@@ -96,15 +103,15 @@ public abstract class ChatListenerMixin {
     }
 
     @Unique
-    private Component googlechat$s2c(Component message) {
-        return GoogleChat.translateIfNeeded(message, TranslationDirection.S2C, true);
+    private Component googlechat$translate(Component message, TranslationDirection direction) {
+        return GoogleChat.translateIfNeeded(message, direction, true);
     }
 
     @Unique
-    private void googlechat$scheduleS2C(Component message, Consumer<Component> runnable) {
-        if (!GoogleChatConfig.Advanced.async) runnable.accept(googlechat$s2c(message));
+    private void googlechat$scheduleTranslation(Component message, TranslationDirection direction, Consumer<Component> runnable) {
+        if (!GoogleChatConfig.Advanced.async) runnable.accept(googlechat$translate(message, direction));
         else {
-            CompletableFuture<Component> translated = CompletableFuture.supplyAsync(() -> googlechat$s2c(message), googlechat$executor);
+            CompletableFuture<Component> translated = CompletableFuture.supplyAsync(() -> googlechat$translate(message, direction), googlechat$executor);
             googlechat$currentFuture = googlechat$currentFuture
                 .handle((_1, _2) -> (Void) null)
                 .thenCompose(_1 -> translated)
@@ -127,11 +134,13 @@ public abstract class ChatListenerMixin {
     }
 
     @Unique
-    private boolean googlechat$shouldTranslate() {
-        if (!GoogleChatConfig.General.enabled) return false;
-        if (minecraft == null || minecraft.player == null) return false;
+    private TranslationDirection googlechat$displayDirection() {
+        if (!GoogleChatConfig.General.enabled) return null;
+        if (minecraft == null || minecraft.player == null) return null;
         var sender = this.sender.get();
-        if (sender == null) return true;
-        return !sender.id().equals(minecraft.player.getUUID());
+        if (sender == null || !sender.id().equals(minecraft.player.getUUID())) {
+            return TranslationDirection.S2C;
+        }
+        return TranslationDirection.C2S;
     }
 }
