@@ -15,16 +15,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate release tag format
+        id: tag_check
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release_tag=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_tag=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping release workflow for non-stable tag: $TAG"
+          fi
+
       - name: Setup Java
+        if: steps.tag_check.outputs.release_tag == 'true'
         uses: actions/setup-java@v4
         with:
           java-version: '21'
           distribution: 'temurin'
 
       - name: Make Gradle wrapper executable
+        if: steps.tag_check.outputs.release_tag == 'true'
         run: chmod +x gradlew
 
       - name: Setup Swap
+        if: steps.tag_check.outputs.release_tag == 'true'
         run: |
           sudo swapoff /swapfile 2>/dev/null || true
           sudo fallocate -l 16G /swapfile
@@ -34,9 +49,11 @@ jobs:
           free -h
 
       - name: Build
+        if: steps.tag_check.outputs.release_tag == 'true'
         run: ./gradlew build --no-daemon
 
       - name: Create Release
+        if: steps.tag_check.outputs.release_tag == 'true'
         uses: softprops/action-gh-release@v2
         with:
           files: build/libs/*.jar
