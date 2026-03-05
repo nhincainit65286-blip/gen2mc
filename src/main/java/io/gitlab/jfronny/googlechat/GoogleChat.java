@@ -44,6 +44,11 @@ public class GoogleChat implements ModInitializer {
     private static volatile long circuitOpenUntilMs = 0L;
     private static volatile int dynamicParallelLimit = Math.max(1, GoogleChatConfig.Advanced.maxParallelRequests);
     private static int activeRequests = 0;
+    private static final long BEHAVIOR_WINDOW_MS = 30_000L;
+    private static long behaviorWindowStartMs = System.currentTimeMillis();
+    private static int behaviorMessages = 0;
+    private static int behaviorCommands = 0;
+    private static BehaviorProfile behaviorProfile = BehaviorProfile.CASUAL;
 
     @Override
     public void onInitialize() {
@@ -70,6 +75,11 @@ public class GoogleChat implements ModInitializer {
             consecutiveFailures = 0;
             circuitOpenUntilMs = 0L;
             dynamicParallelLimit = Math.max(1, GoogleChatConfig.Advanced.maxParallelRequests);
+            activeRequests = 0;
+            behaviorWindowStartMs = System.currentTimeMillis();
+            behaviorMessages = 0;
+            behaviorCommands = 0;
+            behaviorProfile = BehaviorProfile.CASUAL;
         }
         updateRequestLimiter();
     }
@@ -113,7 +123,7 @@ public class GoogleChat implements ModInitializer {
     private static String toString(Component text) {
         StringBuilder sb = new StringBuilder();
         text.getVisualOrderText().accept((index, style, codePoint) -> {
-            sb.append((char)codePoint);
+            sb.appendCodePoint(codePoint);
             return true;
         });
         return sb.toString();
@@ -223,6 +233,7 @@ public class GoogleChat implements ModInitializer {
         if (source == null || source.isBlank()) return source;
         if (direction.shouldSkipOutright()) return source;
         if (respectRegex && direction.regexCanFilterNonBlankText() && direction.failsRegex(source)) return source;
+        registerBehaviorSample(source);
         if (isCircuitOpen()) return source;
         if (TRANSLATE_SERVICE == null) return source;
 
@@ -285,7 +296,7 @@ public class GoogleChat implements ModInitializer {
         while (true) {
             synchronized (breakerLock) {
                 int dynamicLimit = GoogleChatConfig.Advanced.adaptiveParallelism
-                        ? Math.max(1, Math.min(maxParallelRequests, dynamicParallelLimit))
+                        ? behaviorAdjustedParallelLimit()
                         : maxParallelRequests;
                 if (activeRequests < dynamicLimit) {
                     activeRequests++;
@@ -349,9 +360,14 @@ public class GoogleChat implements ModInitializer {
         synchronized (map) {
             if (map.containsKey(source)) return map.get(source);
         }
+        if (isCircuitOpen() || TRANSLATE_SERVICE == null || !parsedLanguages(direction).ready()) {
+            return translateIfNeeded(source, direction, respectRegex);
+        }
         String translated = translateIfNeeded(source, direction, respectRegex);
-        synchronized (map) {
-            map.put(source, translated);
+        if (!translated.equals(source)) {
+            synchronized (map) {
+                map.put(source, translated);
+            }
         }
         return translated;
     }
@@ -376,6 +392,44 @@ public class GoogleChat implements ModInitializer {
                 breakerLock.notifyAll();
             }
         }
+    }
+
+    private static int behaviorAdjustedParallelLimit() {
+        int configured = Math.max(1, GoogleChatConfig.Advanced.maxParallelRequests);
+        int dynamic = Math.max(1, Math.min(configured, dynamicParallelLimit));
+        return switch (behaviorProfile) {
+            case CASUAL -> Math.max(1, Math.min(dynamic, Math.max(1, configured / 2)));
+            case COMMAND_HEAVY -> Math.max(1, Math.min(dynamic, Math.max(1, configured / 2)));
+            case BURST -> dynamic;
+        };
+    }
+
+    private static void registerBehaviorSample(String message) {
+        long now = System.currentTimeMillis();
+        synchronized (breakerLock) {
+            if (now - behaviorWindowStartMs >= BEHAVIOR_WINDOW_MS) {
+                BehaviorProfile previous = behaviorProfile;
+                behaviorProfile = classifyBehaviorLocked();
+                behaviorWindowStartMs = now;
+                behaviorMessages = 0;
+                behaviorCommands = 0;
+                if (GoogleChatConfig.Advanced.debugLogs && previous != behaviorProfile) {
+                    LOGGER.info("Behavior profile changed: {0} -> {1}", previous, behaviorProfile);
+                }
+                breakerLock.notifyAll();
+            }
+            behaviorMessages++;
+            if (message.startsWith("/")) {
+                behaviorCommands++;
+            }
+        }
+    }
+
+    private static BehaviorProfile classifyBehaviorLocked() {
+        if (behaviorMessages <= 0) return BehaviorProfile.CASUAL;
+        if (behaviorMessages >= 20) return BehaviorProfile.BURST;
+        if (behaviorCommands * 2 >= behaviorMessages) return BehaviorProfile.COMMAND_HEAVY;
+        return BehaviorProfile.CASUAL;
     }
 
     private static void onRequestFailure(Throwable throwable) {
@@ -518,5 +572,11 @@ public class GoogleChat implements ModInitializer {
         boolean ready() {
             return sourceLang != null && targetLang != null;
         }
+    }
+
+    private enum BehaviorProfile {
+        CASUAL,
+        COMMAND_HEAVY,
+        BURST
     }
 }
