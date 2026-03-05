@@ -33,11 +33,17 @@ public class GoogleChat implements ModInitializer {
     private static final TranslationDirection.Split<Map<Component, CompletableFuture<Component>>> finalTextsPending = TranslationDirection.Split.of(HashMap::new);
     private static final TranslationDirection.Split<Map<ComponentContents, CompletableFuture<ComponentContents>>> textContentsPending = TranslationDirection.Split.of(HashMap::new);
     private static final TranslationDirection.Split<Map<String, CompletableFuture<String>>> stringsPending = TranslationDirection.Split.of(HashMap::new);
+    private static final TranslationDirection.Split<Map<String, String>> stringsBatch = TranslationDirection.Split.of(() -> new FixedSizeMap<>(GoogleChatConfig.Advanced.cacheSize));
     private static volatile ParsedLanguages c2sLanguages = ParsedLanguages.empty();
     private static volatile ParsedLanguages s2cLanguages = ParsedLanguages.empty();
     private static volatile int maxParallelRequests = Math.max(1, GoogleChatConfig.Advanced.maxParallelRequests);
     private static volatile Semaphore requestLimiter = new Semaphore(maxParallelRequests);
     private static final ExecutorService translationExecutor = Executors.newVirtualThreadPerTaskExecutor();
+    private static final Object breakerLock = new Object();
+    private static volatile int consecutiveFailures = 0;
+    private static volatile long circuitOpenUntilMs = 0L;
+    private static volatile int dynamicParallelLimit = Math.max(1, GoogleChatConfig.Advanced.maxParallelRequests);
+    private static int activeRequests = 0;
 
     @Override
     public void onInitialize() {
@@ -53,8 +59,18 @@ public class GoogleChat implements ModInitializer {
                 map.clear();
             }
         });
+        Stream.of(stringsBatch).flatMap(TranslationDirection.Split::stream).forEach(map -> {
+            synchronized (map) {
+                map.clear();
+            }
+        });
         TranslationDirection.onConfigChange();
         updateParsedLanguages();
+        synchronized (breakerLock) {
+            consecutiveFailures = 0;
+            circuitOpenUntilMs = 0L;
+            dynamicParallelLimit = Math.max(1, GoogleChatConfig.Advanced.maxParallelRequests);
+        }
         updateRequestLimiter();
     }
 
@@ -114,7 +130,7 @@ public class GoogleChat implements ModInitializer {
                 Object[] args = mapPossiblyAsync(Arrays.asList(tx.getArgs()), arg -> switch (arg) {
                     case Component tx1 -> doTranslateIfNeeded(tx1, direction);
                     case ComponentContents tx1 -> translateIfNeeded(tx1, direction, false);
-                    case String tx1 -> translateIfNeeded(tx1, direction, false);
+                    case String tx1 -> translateIfNeededFromBatch(tx1, direction, false);
                     case null -> null;
                     default -> {
                         if (GoogleChatConfig.Advanced.debugLogs) LOGGER.warn("Unhandled argument type: {0} ({1})", arg.getClass().toString(), arg.toString());
@@ -207,6 +223,7 @@ public class GoogleChat implements ModInitializer {
         if (source == null || source.isBlank()) return source;
         if (direction.shouldSkipOutright()) return source;
         if (respectRegex && direction.regexCanFilterNonBlankText() && direction.failsRegex(source)) return source;
+        if (isCircuitOpen()) return source;
         if (TRANSLATE_SERVICE == null) return source;
 
         ParsedLanguages parsed = parsedLanguages(direction);
@@ -224,7 +241,7 @@ public class GoogleChat implements ModInitializer {
                 @SuppressWarnings("rawtypes") TranslateService svc = GoogleChat.TRANSLATE_SERVICE;
                 if (svc == null) throw new IllegalStateException("Translate service uninitialized");
                 try {
-                    String translated = m.group(1) + withRequestPermit(() -> svc.translate(m.group(2), parsed.sourceLang(), parsed.targetLang())) + m.group(3);
+                    String translated = m.group(1) + translateWithRetryAndPermit(svc, m.group(2), parsed.sourceLang(), parsed.targetLang()) + m.group(3);
 
                     if (originalFormatting.isEmpty()) {
                         return translated;
@@ -264,11 +281,120 @@ public class GoogleChat implements ModInitializer {
                 interrupted = true;
             }
         }
+        boolean activeSlotAcquired = false;
+        while (true) {
+            synchronized (breakerLock) {
+                int dynamicLimit = GoogleChatConfig.Advanced.adaptiveParallelism
+                        ? Math.max(1, Math.min(maxParallelRequests, dynamicParallelLimit))
+                        : maxParallelRequests;
+                if (activeRequests < dynamicLimit) {
+                    activeRequests++;
+                    activeSlotAcquired = true;
+                    break;
+                }
+                try {
+                    breakerLock.wait(25L);
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
+            }
+        }
         try {
             return supplier.get();
         } finally {
+            if (activeSlotAcquired) {
+                synchronized (breakerLock) {
+                    activeRequests = Math.max(0, activeRequests - 1);
+                    breakerLock.notifyAll();
+                }
+            }
             limiter.release();
             if (interrupted) Thread.currentThread().interrupt();
+        }
+    }
+
+    @SuppressWarnings("rawtypes")
+    private static String translateWithRetryAndPermit(TranslateService svc, String text, Language sourceLang, Language targetLang) throws Throwable {
+        int retries = Math.max(0, GoogleChatConfig.Advanced.retryAttempts);
+        int backoff = Math.max(0, GoogleChatConfig.Advanced.retryBackoffMs);
+        Throwable last = null;
+        for (int attempt = 0; attempt <= retries; attempt++) {
+            if (attempt > 0 && isCircuitOpen()) {
+                break;
+            }
+            try {
+                String translated = withRequestPermit(() -> (String) svc.translate(text, sourceLang, targetLang));
+                onRequestSuccess();
+                return translated;
+            } catch (Throwable throwable) {
+                last = throwable;
+                onRequestFailure(throwable);
+                if (attempt >= retries) break;
+                long sleep = (long) backoff * (attempt + 1);
+                if (sleep <= 0) continue;
+                try {
+                    Thread.sleep(sleep);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw throwable;
+                }
+            }
+        }
+        throw last == null ? new IllegalStateException("Unknown translation failure") : last;
+    }
+
+    private static String translateIfNeededFromBatch(String source, TranslationDirection direction, boolean respectRegex) {
+        if (source == null || source.isBlank()) return source;
+        Map<String, String> map = stringsBatch.get(direction);
+        synchronized (map) {
+            if (map.containsKey(source)) return map.get(source);
+        }
+        String translated = translateIfNeeded(source, direction, respectRegex);
+        synchronized (map) {
+            map.put(source, translated);
+        }
+        return translated;
+    }
+
+    private static boolean isCircuitOpen() {
+        if (!GoogleChatConfig.Advanced.circuitBreaker) return false;
+        long now = System.currentTimeMillis();
+        long openUntil = circuitOpenUntilMs;
+        return openUntil > now;
+    }
+
+    private static void onRequestSuccess() {
+        synchronized (breakerLock) {
+            consecutiveFailures = 0;
+            if (!GoogleChatConfig.Advanced.adaptiveParallelism) {
+                dynamicParallelLimit = Math.max(1, GoogleChatConfig.Advanced.maxParallelRequests);
+                return;
+            }
+            int configured = Math.max(1, GoogleChatConfig.Advanced.maxParallelRequests);
+            if (dynamicParallelLimit < configured) {
+                dynamicParallelLimit++;
+                breakerLock.notifyAll();
+            }
+        }
+    }
+
+    private static void onRequestFailure(Throwable throwable) {
+        synchronized (breakerLock) {
+            consecutiveFailures++;
+            if (GoogleChatConfig.Advanced.adaptiveParallelism && dynamicParallelLimit > 1) {
+                dynamicParallelLimit = Math.max(1, dynamicParallelLimit / 2);
+                breakerLock.notifyAll();
+            }
+            if (GoogleChatConfig.Advanced.circuitBreaker
+                    && consecutiveFailures >= Math.max(1, GoogleChatConfig.Advanced.circuitBreakerFailures)) {
+                long cooldownMs = Math.max(1, GoogleChatConfig.Advanced.circuitBreakerCooldownSeconds) * 1000L;
+                circuitOpenUntilMs = System.currentTimeMillis() + cooldownMs;
+                consecutiveFailures = 0;
+                breakerLock.notifyAll();
+                if (GoogleChatConfig.Advanced.debugLogs) {
+                    LOGGER.warn("Circuit breaker opened for {0} ms after failure: {1}", cooldownMs, throwable.toString());
+                }
+            }
         }
     }
 
@@ -317,6 +443,11 @@ public class GoogleChat implements ModInitializer {
             if (configuredMax == maxParallelRequests) return;
             maxParallelRequests = configuredMax;
             requestLimiter = new Semaphore(configuredMax);
+            synchronized (breakerLock) {
+                if (dynamicParallelLimit > configuredMax) dynamicParallelLimit = configuredMax;
+                if (dynamicParallelLimit < 1) dynamicParallelLimit = 1;
+                breakerLock.notifyAll();
+            }
         }
     }
 
